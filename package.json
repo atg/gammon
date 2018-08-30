@@ -1,0 +1,19 @@
+{
+  "name": "gammon",
+  "version": "0.0.1",
+  "description": "auto migrations",
+  "main": "src/index.js",
+  "repository": "https://github.com/atg/gammon.git",
+  "author": "Alex Gordon <alextgordon@gmail.com>",
+  "license": "Apache-2.0",
+  "private": false,
+  "dependencies": {
+    "@types/lodash": "^4.14.116",
+    "@types/node": "^10.9.4",
+    "lodash": "^4.17.10"
+  },
+  "devDependencies": {
+    "sequelize": "^4.38.0",
+    "sqlite3": "^4.0.2"
+  }
+}

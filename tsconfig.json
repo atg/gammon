@@ -1,0 +1,22 @@
+{
+  "include": [ "src/**/*" ],
+  "exclude": [
+    "node_modules",
+    "build",
+  ],
+  "compilerOptions": {
+    "outDir": "build",
+    
+    "sourceMap": true,
+
+    "target": "esnext",
+    "module": "commonjs",
+    "moduleResolution": "node",
+
+    "strict": true,
+    "strictPropertyInitialization": true,
+    "allowUnreachableCode": true,
+    "strictNullChecks": true,
+    "esModuleInterop": true,
+  }
+}
