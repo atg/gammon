@@ -87,7 +87,44 @@ function generateFilename(name, ext) {
     let ss = zpad2(d.getUTCSeconds());
     return `${YYYY}-${MM}-${DD}-${hh}${mm}${ss}_${slugify(name)}.${ext}`;
 }
+function fromEntries(entries) {
+    let obj = {};
+    for (let [k, v] of entries) {
+        obj[k] = v;
+    }
+    return obj;
+}
+function normalizeSQLTypeInner(t) {
+    if (lodash_1.default.isFunction(t)) {
+        return { type: t() };
+    }
+    else if (lodash_1.default.isFunction(t.type)) {
+        t.type = t.type();
+        return t;
+    }
+    else if (!t.type) {
+        return { type: t };
+    }
+    else {
+        let obj = fromEntries(Object.entries(t));
+        return obj;
+    }
+}
+function normalizeSQLType(t) {
+    t = normalizeSQLTypeInner(t);
+    let name = t.type.key;
+    let options = removePrivates(t.type.options);
+    t.type = [name, options];
+    return removePrivates(t);
+}
 const pj = path_1.default.join;
+function removePrivates(v) {
+    if (lodash_1.default.isPlainObject(v)) {
+        return fromEntries(Object.entries(v).filter(kv => (kv[0][0] !== '_')));
+    }
+    return v;
+}
+const quote = (j) => JSON.stringify(j, (k, v) => removePrivates(v));
 // let headStat; try { headStat = fs.lstatSync(headPath); } catch { }
 function checkPermissions(path) {
     let stat;
@@ -161,6 +198,10 @@ class Gammon {
             fs_1.default.mkdirSync(pj(root, 'log'));
         }
         catch { }
+        try {
+            fs_1.default.mkdirSync(pj(root, 'migrations'));
+        }
+        catch { }
         let stagingPath = pj(root, 'staging.js');
         let headPath = pj(root, 'head.js');
         let stagingStat;
@@ -181,7 +222,7 @@ class Gammon {
         let args = process.argv.slice(2);
         if (args[0] === 'make') {
             if (typeof args[1] === 'string') {
-                this.makeMigration(args[1]);
+                this.makeMigration(args.slice(1).join(' '));
             }
             else {
                 logError('Please give a migration name');
@@ -199,16 +240,21 @@ class Gammon {
         if (!stagingContent.trim()) {
             logError(`${stagingPath} is empty`);
         }
-        let filename = generateFilename(migrationName, 'js');
+        let filenameJs = generateFilename(migrationName, 'js');
+        let filenameTxt = generateFilename(migrationName, 'txt');
         let historyPath = pj(root, 'history');
+        let logPath = pj(root, 'log');
+        let migrationsPath = pj(root, 'migrations');
         let historyElements = fs_1.default.readdirSync(historyPath);
         if (historyElements.length) {
             let head = lodash_1.default.max(historyElements);
             let headPath = pj(historyPath, head);
             let headContent = fs_1.default.readFileSync(headPath, 'utf8');
-            console.log(this.diff(headPath, stagingPath));
+            let [logs, migrations] = this.diff(headPath, stagingPath);
+            fs_1.default.writeFileSync(pj(logPath, filenameTxt), logs);
+            fs_1.default.writeFileSync(pj(migrationsPath, filenameJs), migrations);
         }
-        // fs.copyFileSync(stagingPath, pj(root, 'history', filename), fs.constants.COPYFILE_EXCL);
+        fs_1.default.copyFileSync(stagingPath, pj(root, 'history', filenameJs), fs_1.default.constants.COPYFILE_EXCL);
     }
     diff(older, newer) {
         // This is safe because I said so
@@ -227,16 +273,54 @@ class Gammon {
                 yield [k, v];
             }
         }
-        function findIndexes(model) {
-            return model.options.indexes || [];
+        function* findIndexes(model) {
+            for (let index of model.options.indexes || []) {
+                yield [index.name, index];
+            }
         }
         let models1 = new Map(findModels(m1));
         let models2 = new Map(findModels(m2));
         let log = [];
+        let migration = [];
         let modelsDiff = diffMaps(models1, models2, (tableName, a, b) => {
             let attrs1 = new Map(findAttributes(a));
             let attrs2 = new Map(findAttributes(b));
             let attrsDiff = diffMaps(attrs1, attrs2, (key, atA, atB) => {
+                // console.log(key, JSON.stringify(atA), JSON.stringify(atB));
+                delete atA.Model; // this will cause the model to always show as different
+                delete atB.Model;
+                // possibilities
+                // foo: SQL.TEXT
+                // foo: SQL.TEXT()
+                // foo: SQL.TEXT({ options })
+                atA = normalizeSQLType(atA);
+                atB = normalizeSQLType(atB);
+                // console.log(JSON.stringify(atA));
+                // process.exit();
+                // if  
+                // console.log(_.isEqual(atA, atB));
+                // console.log(util.inspect(atA, true, null, false));
+                // atA.type = _.toString(atA.type);
+                // atB.type = _.toString(atB.type);
+                // console.log(JSON.stringify(atA, null, 4));
+                // process.exit();
+                return lodash_1.default.isEqual(atA, atB);
+            });
+            for (let [name, newAttr] of attrsDiff.leftOnly) {
+                log.push(['attr.create', tableName, name]);
+                migration.push(`createAttribute(db, qi, ${quote(tableName)}, ${quote(name)}, ${quote(normalizeSQLType(newAttr))});`);
+            }
+            for (let [name, oldAttr] of attrsDiff.rightOnly) {
+                log.push(['attr.drop', tableName, name]);
+                migration.push(`dropAttribute(db, qi, ${quote(tableName)}, ${quote(name)});`);
+            }
+            for (let [name, [attr1, attr2]] of attrsDiff.changed) {
+                log.push(['attr.changed', tableName, name]);
+                migration.push(`changedAttribute(db, qi, ${quote(tableName)}, ${quote(name)}, ${quote(normalizeSQLType(attr2))});`);
+            }
+            let indexes1 = new Map(findIndexes(a));
+            let indexes2 = new Map(findIndexes(b));
+            let indexesDiff = diffMaps(indexes1, indexes2, (key, atA, atB) => {
                 // console.log(key, JSON.stringify(atA), JSON.stringify(atB));
                 delete atA.Model; // this will cause the model to always show as different
                 delete atB.Model;
@@ -248,38 +332,18 @@ class Gammon {
                 // process.exit();
                 return lodash_1.default.isEqual(atA, atB);
             });
-            for (let [name, newAttr] of attrsDiff.leftOnly) {
-                log.push(['attr.create', tableName, name]);
+            for (let [name, newIndex] of indexesDiff.leftOnly) {
+                log.push(['index.create', tableName, name]);
+                migration.push(`createIndex(db, qi, ${quote(tableName)}, ${quote(name)}, ${quote(newIndex)});`);
             }
-            for (let [name, oldAttr] of attrsDiff.rightOnly) {
-                log.push(['attr.drop', tableName, name]);
+            for (let [name, oldIndex] of indexesDiff.rightOnly) {
+                log.push(['index.drop', tableName, name]);
+                migration.push(`dropIndex(db, qi, ${quote(tableName)}, ${quote(name)});`);
             }
-            for (let [name, [model1, model2]] of attrsDiff.changed) {
-                log.push(['attr.changed', tableName, name]);
+            for (let [name, [index1, index2]] of indexesDiff.changed) {
+                log.push(['index.changed', tableName, name]);
+                migration.push(`changedIndex(db, qi, ${quote(tableName)}, ${quote(name)}, ${quote(index2)});`);
             }
-            let indexes1 = new Map(findIndexes(a));
-            let indexes2 = new Map(findIndexes(b));
-            // let indexesDiff = diffMaps(indexes1, indexes2, (key: string, atA: any, atB: any) => {
-            //   // console.log(key, JSON.stringify(atA), JSON.stringify(atB));
-            //   delete atA.Model; // this will cause the model to always show as different
-            //   delete atB.Model;
-            //   // console.log(_.isEqual(atA, atB));
-            //   // console.log(util.inspect(atA, true, null, false));
-            //   // atA.type = _.toString(atA.type);
-            //   // atB.type = _.toString(atB.type);
-            //   // console.log(JSON.stringify(atA, null, 4));
-            //   // process.exit();
-            //   return _.isEqual(atA, atB);
-            // });
-            // for (let [name, newIndex] of indexesDiff.leftOnly) {
-            //   log.push(['index.create', tableName, name]);
-            // }
-            // for (let [name, oldIndex] of indexesDiff.rightOnly) {
-            //   log.push(['index.drop', tableName, name]);
-            // }
-            // for (let [name, [model1, model2]] of indexesDiff.changed) {
-            //   log.push(['index.changed', tableName, name]);
-            // }
             // TODO also need to diff other things
             return attrsDiff.same.size === attrs1.size;
             // return _.isEqual(attrs1, attrs2);
@@ -289,11 +353,15 @@ class Gammon {
         // console.log(modelsDiff);
         for (let [name, newModel] of modelsDiff.leftOnly) {
             log.push(['model.create', name]);
+            migration.push(`createTable(db, qi, ${quote(name)});`);
         }
         for (let [name, oldModel] of modelsDiff.rightOnly) {
             log.push(['model.drop', name]);
+            migration.push(`dropTable(db, qi, ${quote(name)});`);
         }
-        console.log(log);
+        let logs = log.map(line => line.join(' ')).join('\n');
+        let migrations = migration.join('\n\n');
+        return [logs, migrations];
         // for (let [k, v] of m1) {
         //   let v2 = v as any;
         //   console.log(k, Object.keys(v));
